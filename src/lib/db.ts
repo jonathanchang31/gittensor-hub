@@ -150,7 +150,6 @@ export function getDb(): Database.Database {
       merged             INTEGER DEFAULT 0,
       author_login       TEXT,
       author_association TEXT,
-      labels             TEXT,
       created_at         TEXT,
       updated_at         TEXT,
       closed_at          TEXT,
@@ -311,9 +310,6 @@ export function getDb(): Database.Database {
   if (!pullsCols.some((c) => c.name === 'author_association')) {
     db.exec('ALTER TABLE pulls ADD COLUMN author_association TEXT');
   }
-  if (!pullsCols.some((c) => c.name === 'labels')) {
-    db.exec('ALTER TABLE pulls ADD COLUMN labels TEXT');
-  }
 
   // One-shot purge of false-positive pr_issue_links (issue #137). Guarded by
   // PRAGMA user_version so it runs exactly once per database file.
@@ -361,7 +357,6 @@ export interface PullRow {
   merged: number;
   author_login: string | null;
   author_association: string | null;
-  labels: string | null;
   created_at: string | null;
   updated_at: string | null;
   closed_at: string | null;

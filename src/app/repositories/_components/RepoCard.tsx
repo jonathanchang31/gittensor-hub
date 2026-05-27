@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { ShieldSlashIcon, StarFillIcon, StarIcon } from '@primer/octicons-react';
+import { StarFillIcon, StarIcon } from '@primer/octicons-react';
 import styles from '../page.module.css';
 import Avatar from './Avatar';
 import { LABEL_COLORS, LABEL_KEYS, LANG_COLORS, LANG_NAME_ICONS, formatLangPct } from '../_lib/colors';
@@ -35,7 +35,6 @@ interface RepoCardProps {
   onOpen: () => void;
   onToggleCompare: () => void;
   onToggleTrack: () => void;
-  onOpenHostileActions: () => void;
 }
 
 export default function RepoCard({
@@ -50,7 +49,6 @@ export default function RepoCard({
   onOpen,
   onToggleCompare,
   onToggleTrack,
-  onOpenHostileActions,
 }: RepoCardProps) {
   const r = row;
   const maintCut = r.maintCut || 0;
@@ -281,19 +279,6 @@ export default function RepoCard({
     >
       <button
         type="button"
-        className={`${styles.compareBtn} ${styles.hostileBtn}`}
-        aria-label={`Review hostile action evidence for ${r.fullName}`}
-        title="Review hostile action evidence"
-        onClick={(e) => {
-          e.stopPropagation();
-          onOpenHostileActions();
-        }}
-      >
-        <ShieldSlashIcon size={13} />
-      </button>
-
-      <button
-        type="button"
         className={`${styles.compareBtn} ${styles.trackBtn} ${isTracked ? styles.on : ''}`}
         aria-label={isTracked ? `Untrack ${r.fullName}` : `Track ${r.fullName}`}
         title={isTracked ? 'Remove from tracked repos' : 'Track this repo'}
@@ -326,7 +311,7 @@ export default function RepoCard({
         )}
       </button>
 
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, paddingRight: 86 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, paddingRight: 28 }}>
         <Avatar fullName={r.fullName} size="lg" />
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ fontSize: 13.5, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>

@@ -3,7 +3,6 @@ import { getReadDb, type PullRow } from '@/lib/db';
 import { authorCredibilityForRepo, getGittensorCredibilityIndex } from '@/lib/gittensor-credibility';
 import { getIssueDiscoveryDisabledReposAsyncServer } from '@/lib/repos-server';
 import { positiveInt } from '@/lib/api-utils';
-import { parsePullLabels } from '@/lib/pull-labels';
 
 export const dynamic = 'force-dynamic';
 
@@ -65,7 +64,7 @@ export async function GET(
   const rows = db
     .prepare(
       `SELECT id, repo_full_name, number, title, NULL as body, state, draft, merged,
-              author_login, author_association, labels, created_at, updated_at, closed_at, merged_at,
+              author_login, author_association, created_at, updated_at, closed_at, merged_at,
               html_url, fetched_at, first_seen_at
        FROM pulls
        WHERE repo_full_name = ? AND author_login = ?
@@ -106,7 +105,6 @@ export async function GET(
     },
     pulls: rows.map((r) => ({
       ...r,
-      labels: parsePullLabels(r.labels),
       author_credibility: authorCredibilityForRepo(credibilityIndex, r.author_login, r.repo_full_name, {
         issueDiscoveryDisabled,
       }),
