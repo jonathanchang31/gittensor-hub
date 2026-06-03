@@ -255,6 +255,8 @@ export function recentPendingUsers(limit = 20): UserRow[] {
 // ---------------------------------------------------------------------------
 // Role management (admin <-> regular user)
 // ---------------------------------------------------------------------------
+// Keep guard-then-update role changes inside one transaction on the same DB
+// handle so the guard cannot be invalidated by an interleaved write.
 
 export class RoleError extends Error {
   constructor(
@@ -301,12 +303,17 @@ export function promoteUser(id: number, byId: number): UserRow {
  * or the last remaining admin.
  */
 export function demoteUser(id: number, byId: number): UserRow {
-  const target = getUserById(id);
-  if (!target) throw new RoleError('not_found', 'User not found');
-  if (id === byId) throw new RoleError('self_demote', 'You cannot demote yourself');
-  if (!target.is_admin) return target;
-  if (countAdmins() <= 1) throw new RoleError('last_admin', 'Cannot demote the last admin');
   const db = getDb();
-  db.prepare('UPDATE users SET is_admin = 0 WHERE id = ?').run(id);
-  return getUserById(id)!;
+  return db.transaction((): UserRow => {
+    const target = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
+    if (!target) throw new RoleError('not_found', 'User not found');
+    if (id === byId) throw new RoleError('self_demote', 'You cannot demote yourself');
+    if (!target.is_admin) return target;
+
+    const adminCount = (db.prepare('SELECT COUNT(*) c FROM users WHERE is_admin = 1').get() as { c: number }).c;
+    if (adminCount <= 1) throw new RoleError('last_admin', 'Cannot demote the last admin');
+
+    db.prepare('UPDATE users SET is_admin = 0 WHERE id = ?').run(id);
+    return db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow;
+  })();
 }

@@ -96,7 +96,7 @@ const eslintConfig = [
     },
   },
   {
-    files: ['*.config.js', 'ecosystem.config.js'],
+    files: ['*.config.js', 'ecosystem.config.js', 'scripts/**/*.cjs'],
     rules: {
       '@typescript-eslint/no-require-imports': 'off',
     },

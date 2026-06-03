@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "next dev -p 12074",
     "build": "next build",
+    "test:auth": "node scripts/verify-demote-last-admin-guard.cjs",
     "start": "next start -p 12074",
     "lint": "eslint . --max-warnings=0",
     "lint:warnings": "eslint ."
@@ -35,10 +36,5 @@
     "eslint": "^9.39.4",
     "eslint-config-next": "^15.5.18",
     "typescript": "^5.7.2"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3"
-    ]
   }
 }
