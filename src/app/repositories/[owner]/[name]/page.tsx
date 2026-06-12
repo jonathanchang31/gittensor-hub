@@ -23,35 +23,27 @@ import {
   CheckCircleIcon,
   XCircleIcon,
   PulseIcon,
-  StopwatchIcon,
-  GitMergeIcon,
-  InboxIcon,
 } from '@primer/octicons-react';
 import type { Icon } from '@primer/octicons-react';
 import Spinner from '@/components/Spinner';
-import { SkeletonBar } from '@/components/Skeleton';
+import IssuesTable from '@/components/IssuesTable';
+import PullsTable from '@/components/PullsTable';
 import { isTracked as repoIsTracked, useTrackedRepos } from '@/lib/tracked-repos';
 import type {
-  Issue,
-  IssuesResponse,
   GtRepoSummary,
-  GtRepoPrsResponse,
   RepoMiner,
   RepoMinersResponse,
 } from '@/types/entities';
 import { renderMarkdownToHtml } from '@/lib/markdown';
-import { formatRelativeTime, formatDurationHours, formatDurationDays } from '@/lib/format';
+import { formatRelativeTime } from '@/lib/format';
 import {
-  headlineReviewSpeed,
-  headlineIssueResponse,
-  headlineDecisionSpeed,
-  reviewSpeedVerdict,
-  issueResponseVerdict,
-  reviewSpeedGaugePos,
-  REVIEW_SPEED_GAUGE_TICKS,
-  type MaintainerStats,
-} from '@/lib/api-types';
-import { maintainerStatsQuery } from '../../_lib/maintainer-stats-query';
+  MaintainerScorecard,
+  Panel,
+  PanelLoading,
+  PanelError,
+  PanelEmpty,
+  CountBox,
+} from '@/components/repositories/MaintainerScorecard';
 
 type TabKey = 'readme' | 'code' | 'issues' | 'pulls' | 'contributing' | 'maintenance' | 'check';
 
@@ -81,6 +73,11 @@ export default function RepoDetailPage(ctx: { params: Promise<{ owner: string; n
     },
     refetchInterval: 60_000,
   });
+
+  // Issues / Pull Requests render the full global table, which is too wide to
+  // sit beside the 320px stats sidebar — give those tabs the full width and let
+  // the sidebar stack underneath.
+  const wideTab = tab === 'issues' || tab === 'pulls';
 
   return (
     <PageLayout containerWidth="xlarge" padding="normal">
@@ -209,7 +206,7 @@ export default function RepoDetailPage(ctx: { params: Promise<{ owner: string; n
       </PageLayout.Header>
 
       <PageLayout.Content>
-        <Box sx={{ display: ['block', null, 'flex'], gap: 4, alignItems: 'flex-start' }}>
+        <Box sx={{ display: wideTab ? 'block' : ['block', null, 'flex'], gap: 4, alignItems: 'flex-start' }}>
           <Box sx={{ flex: 1, minWidth: 0 }}>
             {tab === 'readme' && <ReadmeTab owner={params.owner} name={params.name} />}
             {tab === 'code' && <CodeTab owner={params.owner} name={params.name} />}
@@ -220,7 +217,11 @@ export default function RepoDetailPage(ctx: { params: Promise<{ owner: string; n
             {tab === 'check' && <RepoCheckTab owner={params.owner} name={params.name} />}
           </Box>
 
-          <Box sx={{ width: ['100%', null, 320], flexShrink: 0, position: ['static', null, 'sticky'], top: 'calc(var(--header-height) + 16px)', display: 'flex', flexDirection: 'column', gap: 4, mt: [4, null, 0] }}>
+          <Box
+            sx={wideTab
+              ? { width: '100%', flexShrink: 0, mt: 4, display: 'grid', gridTemplateColumns: ['1fr', null, '1fr 1fr'], gap: 4, alignItems: 'start' }
+              : { width: ['100%', null, 320], flexShrink: 0, position: ['static', null, 'sticky'], top: 'calc(var(--header-height) + 16px)', display: 'flex', flexDirection: 'column', gap: 4, mt: [4, null, 0] }}
+          >
             <SidebarSection title="Repository Stats">
               <KvRow label="Weight" value={summary.data?.weight != null ? summary.data.weight.toFixed(2) : '—'} />
               <KvRow label="Total Score" value={fmtScore(summary.data?.totalScore)} />
@@ -235,7 +236,7 @@ export default function RepoDetailPage(ctx: { params: Promise<{ owner: string; n
               <KvSubRow label="Closed" value={summary.data?.otherClosedIssueCount ?? '—'} />
             </SidebarSection>
 
-            <TopMinersCard owner={params.owner} name={params.name} />
+            <TopMinersCard owner={params.owner} name={params.name} issueDiscoveryEnabled={summary.data?.issueDiscoveryEnabled ?? false} />
           </Box>
         </Box>
       </PageLayout.Content>
@@ -372,486 +373,14 @@ function ContributingTab({ owner, name }: { owner: string; name: string }) {
 
 // ─── Issues tab ──────────────────────────────────────────────────────────────
 
-type IssueFilter = 'all' | 'open' | 'closed';
-
 function IssuesTab({ owner, name }: { owner: string; name: string }) {
-  const [filter, setFilter] = useState<IssueFilter>('all');
-
-  const issuesQ = useQuery<IssuesResponse>({
-    queryKey: ['gt-detail-issues', owner, name],
-    queryFn: async () => {
-      const r = await fetch(`/api/repos/${owner}/${name}/issues`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return r.json();
-    },
-    refetchInterval: 30_000,
-  });
-  const prsQ = useQuery<Pick<GtRepoPrsResponse, 'prs'>>({
-    queryKey: ['gt-repo-prs', owner, name],
-    queryFn: async () => {
-      const r = await fetch(`/api/gt/repos/${owner}/${name}/prs`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return r.json();
-    },
-    refetchInterval: 30_000,
-  });
-
-  // Map issue# → PR# via gittensor convention (PR title starts with `#issueNum …`).
-  const linkedPrByIssue = useMemo(() => {
-    const map = new Map<number, number>();
-    for (const p of prsQ.data?.prs ?? []) {
-      if (p.linkedIssueNumber != null && !map.has(p.linkedIssueNumber)) {
-        map.set(p.linkedIssueNumber, p.pullRequestNumber);
-      }
-    }
-    return map;
-  }, [prsQ.data]);
-
-  const counts = useMemo(() => {
-    const issues = issuesQ.data?.issues ?? [];
-    const open = issues.filter((i) => i.state === 'open').length;
-    return { all: issues.length, open, closed: issues.length - open };
-  }, [issuesQ.data]);
-
-  const rows: Issue[] = useMemo(() => {
-    const issues = issuesQ.data?.issues ?? [];
-    return issues.filter((i) => {
-      if (filter === 'open') return i.state === 'open';
-      if (filter === 'closed') return i.state !== 'open';
-      return true;
-    });
-  }, [issuesQ.data, filter]);
-
-  if (issuesQ.isLoading) return <PanelLoading />;
-  if (issuesQ.isError) return <PanelError message="Failed to load issues." />;
-
-  return (
-    <Panel>
-      <Box
-        sx={{
-          p: 3,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 3,
-          borderBottom: '1px solid',
-          borderColor: 'border.default',
-          flexWrap: 'wrap',
-        }}
-      >
-        <Heading sx={{ fontSize: 3, fontWeight: 700, m: 0 }}>
-          Issues <Text sx={{ color: 'fg.muted', fontWeight: 400 }}>({counts.all})</Text>
-        </Heading>
-        <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 1 }}>
-          <FilterPill active={filter === 'all'} onClick={() => setFilter('all')} label="All" count={counts.all} />
-          <FilterPill active={filter === 'open'} onClick={() => setFilter('open')} label="Open" count={counts.open} />
-          <FilterPill active={filter === 'closed'} onClick={() => setFilter('closed')} label="Closed" count={counts.closed} />
-        </Box>
-      </Box>
-
-      <Box as="table" sx={{ width: '100%', minWidth: 760, borderCollapse: 'collapse', fontSize: 1 }}>
-        <Box as="thead" sx={{ bg: 'canvas.subtle', borderBottom: '1px solid', borderColor: 'border.default' }}>
-          <Box as="tr">
-            <ColTh>ISSUE #</ColTh>
-            <ColTh>TITLE</ColTh>
-            <ColTh>STATUS</ColTh>
-            <ColTh>LINKED PR</ColTh>
-            <ColTh>CREATED</ColTh>
-            <ColTh align="right">CLOSED</ColTh>
-          </Box>
-        </Box>
-        <Box as="tbody">
-          {rows.length === 0 && (
-            <Box as="tr">
-              <Box as="td" colSpan={6} sx={{ p: 4, textAlign: 'center', color: 'fg.muted' }}>
-                No issues match.
-              </Box>
-            </Box>
-          )}
-          {rows.map((it) => {
-            const closed = it.state !== 'open';
-            const linkedPr = linkedPrByIssue.get(it.number);
-            return (
-              <Box as="tr" key={it.id} sx={rowSx}>
-                <Box as="td" sx={cellSx}>
-                  <a href={it.html_url ?? '#'} target="_blank" rel="noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}>
-                    <Text sx={{ fontFamily: 'mono', color: 'fg.default', '&:hover': { color: 'accent.fg' } }}>
-                      #{it.number}
-                    </Text>
-                  </a>
-                </Box>
-                <Box as="td" sx={{ ...cellSx, maxWidth: 0 }}>
-                  <a href={it.html_url ?? '#'} target="_blank" rel="noreferrer" style={{ color: 'inherit', textDecoration: 'none' }} title={it.title}>
-                    <Text sx={{ fontFamily: 'mono', color: 'fg.default', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block', '&:hover': { color: 'accent.fg' } }}>
-                      {it.title}
-                    </Text>
-                  </a>
-                </Box>
-                <Box as="td" sx={cellSx}>
-                  <StatePill kind={closed ? 'closed-issue' : 'open-issue'} />
-                </Box>
-                <Box as="td" sx={cellSx}>
-                  {linkedPr ? (
-                    <a
-                      href={`https://github.com/${owner}/${name}/pull/${linkedPr}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ color: 'var(--accent-fg)', textDecoration: 'none', fontFamily: 'ui-monospace, SFMono-Regular, monospace' }}
-                    >
-                      #{linkedPr}
-                    </a>
-                  ) : (
-                    <Text sx={{ color: 'fg.muted' }}>—</Text>
-                  )}
-                </Box>
-                <Box as="td" sx={cellSx}>
-                  <Text sx={{ fontFamily: 'mono', color: 'fg.default' }}>{fmtShortDate(it.created_at)}</Text>
-                </Box>
-                <Box as="td" sx={{ ...cellSx, textAlign: 'right' }}>
-                  <Text sx={{ fontFamily: 'mono', color: it.closed_at ? 'fg.default' : 'fg.muted' }}>
-                    {it.closed_at ? fmtShortDate(it.closed_at) : '—'}
-                  </Text>
-                </Box>
-              </Box>
-            );
-          })}
-        </Box>
-      </Box>
-    </Panel>
-  );
+  return <IssuesTable repo={`${owner}/${name}`} />;
 }
 
 // ─── Pull Requests tab ───────────────────────────────────────────────────────
 
-type PrFilter = 'all' | 'open' | 'merged' | 'closed';
-type PrSortKey = 'score' | 'commits' | 'changes' | 'created' | 'merged' | 'number';
-
 function PullsTab({ owner, name }: { owner: string; name: string }) {
-  const [filter, setFilter] = useState<PrFilter>('all');
-  const [sortKey, setSortKey] = useState<PrSortKey>('score');
-  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-
-  const { data, isLoading, isError } = useQuery<GtRepoPrsResponse>({
-    queryKey: ['gt-repo-prs', owner, name],
-    queryFn: async () => {
-      const r = await fetch(`/api/gt/repos/${owner}/${name}/prs`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return r.json();
-    },
-    refetchInterval: 30_000,
-  });
-
-  const onSort = (k: PrSortKey) => {
-    if (sortKey === k) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
-    else { setSortKey(k); setSortDir('desc'); }
-  };
-
-  const rows = useMemo(() => {
-    const all = data?.prs ?? [];
-    const filtered = all.filter((p) => {
-      if (filter === 'open') return p.prState === 'OPEN';
-      if (filter === 'merged') return p.prState === 'MERGED';
-      if (filter === 'closed') return p.prState === 'CLOSED';
-      return true;
-    });
-    return [...filtered].sort((a, b) => {
-      let cmp = 0;
-      if (sortKey === 'score') cmp = a.score - b.score;
-      else if (sortKey === 'commits') cmp = a.commitCount - b.commitCount;
-      else if (sortKey === 'changes') cmp = (a.additions + a.deletions) - (b.additions + b.deletions);
-      else if (sortKey === 'created') cmp = (Date.parse(a.prCreatedAt) || 0) - (Date.parse(b.prCreatedAt) || 0);
-      else if (sortKey === 'merged') cmp = (a.mergedAt ? Date.parse(a.mergedAt) : 0) - (b.mergedAt ? Date.parse(b.mergedAt) : 0);
-      else if (sortKey === 'number') cmp = a.pullRequestNumber - b.pullRequestNumber;
-      if (cmp === 0) cmp = b.pullRequestNumber - a.pullRequestNumber;
-      return sortDir === 'desc' ? -cmp : cmp;
-    });
-  }, [data, filter, sortKey, sortDir]);
-
-  if (isLoading) return <PanelLoading />;
-  if (isError) return <PanelError message="Failed to load pull requests." />;
-
-  const counts = data?.counts ?? { all: 0, open: 0, merged: 0, closed: 0 };
-
-  return (
-    <Panel>
-      <Box
-        sx={{
-          p: 3,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 3,
-          borderBottom: '1px solid',
-          borderColor: 'border.default',
-          flexWrap: 'wrap',
-        }}
-      >
-        <Heading sx={{ fontSize: 3, fontWeight: 700, m: 0 }}>
-          Pull Requests <Text sx={{ color: 'fg.muted', fontWeight: 400 }}>({counts.all})</Text>
-        </Heading>
-        <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 1 }}>
-          <FilterPill active={filter === 'all'} onClick={() => setFilter('all')} label="All" count={counts.all} />
-          <FilterPill active={filter === 'open'} onClick={() => setFilter('open')} label="Open" count={counts.open} />
-          <FilterPill active={filter === 'merged'} onClick={() => setFilter('merged')} label="Merged" count={counts.merged} />
-          <FilterPill active={filter === 'closed'} onClick={() => setFilter('closed')} label="Closed" count={counts.closed} />
-        </Box>
-      </Box>
-
-      <Box as="table" sx={{ width: '100%', minWidth: 920, borderCollapse: 'collapse', fontSize: 1 }}>
-        <Box as="thead" sx={{ bg: 'canvas.subtle', borderBottom: '1px solid', borderColor: 'border.default' }}>
-          <Box as="tr">
-            <SortableTh sk="number" current={sortKey} dir={sortDir} onSort={onSort}>PR #</SortableTh>
-            <ColTh>TITLE</ColTh>
-            <ColTh>AUTHOR</ColTh>
-            <SortableTh sk="commits" current={sortKey} dir={sortDir} onSort={onSort} align="right">COMMITS</SortableTh>
-            <SortableTh sk="changes" current={sortKey} dir={sortDir} onSort={onSort} align="right">+/-</SortableTh>
-            <SortableTh sk="score" current={sortKey} dir={sortDir} onSort={onSort} align="right">SCORE</SortableTh>
-            <ColTh align="left">STATUS</ColTh>
-            <SortableTh sk="merged" current={sortKey} dir={sortDir} onSort={onSort} align="right">MERGED</SortableTh>
-          </Box>
-        </Box>
-        <Box as="tbody">
-          {rows.length === 0 && (
-            <Box as="tr">
-              <Box as="td" colSpan={8} sx={{ p: 4, textAlign: 'center', color: 'fg.muted' }}>
-                No pull requests match.
-              </Box>
-            </Box>
-          )}
-          {rows.map((p) => {
-            const url = `https://github.com/${owner}/${name}/pull/${p.pullRequestNumber}`;
-            return (
-              <Box as="tr" key={p.pullRequestNumber} sx={rowSx}>
-                <Box as="td" sx={cellSx}>
-                  <a href={url} target="_blank" rel="noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}>
-                    <Text sx={{ fontFamily: 'mono', color: 'fg.default', '&:hover': { color: 'accent.fg' } }}>
-                      #{p.pullRequestNumber}
-                    </Text>
-                  </a>
-                </Box>
-                <Box as="td" sx={{ ...cellSx, maxWidth: 0 }}>
-                  <a href={url} target="_blank" rel="noreferrer" style={{ color: 'inherit', textDecoration: 'none' }} title={p.title}>
-                    <Text sx={{ fontFamily: 'mono', color: 'fg.default', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block', '&:hover': { color: 'accent.fg' } }}>
-                      {p.title}
-                    </Text>
-                  </a>
-                </Box>
-                <Box as="td" sx={cellSx}>
-                  <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={p.avatarUrl}
-                      alt={p.author}
-                      loading="lazy"
-                      style={{ width: 20, height: 20, borderRadius: '50%', border: '1px solid var(--border-muted)' }}
-                    />
-                    <Text sx={{ fontFamily: 'mono', color: 'fg.default' }}>{p.author}</Text>
-                  </Box>
-                </Box>
-                <Box as="td" sx={{ ...cellSx, textAlign: 'right' }}>
-                  <Text sx={{ fontFamily: 'mono', color: 'fg.default', fontVariantNumeric: 'tabular-nums' }}>
-                    {p.commitCount}
-                  </Text>
-                </Box>
-                <Box as="td" sx={{ ...cellSx, textAlign: 'right' }}>
-                  <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 1, fontFamily: 'mono', fontVariantNumeric: 'tabular-nums' }}>
-                    <Text sx={{ color: 'success.fg' }}>+{p.additions}</Text>
-                    <Text sx={{ color: 'danger.fg' }}>-{p.deletions}</Text>
-                  </Box>
-                </Box>
-                <Box as="td" sx={{ ...cellSx, textAlign: 'right' }}>
-                  <Text sx={{ fontFamily: 'mono', color: p.score > 0 ? 'fg.default' : 'fg.muted', fontVariantNumeric: 'tabular-nums', fontWeight: p.score > 0 ? 600 : 400 }}>
-                    {p.score.toFixed(4)}
-                  </Text>
-                </Box>
-                <Box as="td" sx={cellSx}>
-                  <StatePill kind={p.prState === 'MERGED' ? 'merged-pr' : p.prState === 'CLOSED' ? 'closed-pr' : 'open-pr'} />
-                </Box>
-                <Box as="td" sx={{ ...cellSx, textAlign: 'right' }}>
-                  <Text sx={{ fontFamily: 'mono', color: p.mergedAt ? 'fg.default' : 'fg.muted' }}>
-                    {p.mergedAt ? fmtShortDate(p.mergedAt) : '—'}
-                  </Text>
-                </Box>
-              </Box>
-            );
-          })}
-        </Box>
-      </Box>
-    </Panel>
-  );
-}
-
-// ─── Shared bits for the issue/PR tables ─────────────────────────────────────
-
-const rowSx = {
-  borderBottom: '1px solid',
-  borderColor: 'border.muted',
-  '&:hover': { bg: 'canvas.subtle' },
-  '&:last-child': { borderBottom: 'none' },
-};
-
-const cellSx = {
-  px: 3,
-  py: 2,
-  verticalAlign: 'middle',
-  whiteSpace: 'nowrap',
-} as const;
-
-function ColTh({ children, align = 'left' }: { children: React.ReactNode; align?: 'left' | 'right' }) {
-  return (
-    <Box
-      as="th"
-      sx={{
-        px: 3,
-        py: 2,
-        textAlign: align,
-        fontWeight: 600,
-        fontSize: '11px',
-        color: 'fg.muted',
-        textTransform: 'uppercase',
-        letterSpacing: '0.5px',
-        whiteSpace: 'nowrap',
-      }}
-    >
-      {children}
-    </Box>
-  );
-}
-
-function SortableTh({
-  children,
-  sk,
-  current,
-  dir,
-  onSort,
-  align = 'left',
-}: {
-  children: React.ReactNode;
-  sk: PrSortKey;
-  current: PrSortKey;
-  dir: 'asc' | 'desc';
-  onSort: (k: PrSortKey) => void;
-  align?: 'left' | 'right';
-}) {
-  const active = current === sk;
-  return (
-    <Box
-      as="th"
-      onClick={() => onSort(sk)}
-      sx={{
-        px: 3,
-        py: 2,
-        textAlign: align,
-        fontWeight: 600,
-        fontSize: '11px',
-        color: active ? 'fg.default' : 'fg.muted',
-        textTransform: 'uppercase',
-        letterSpacing: '0.5px',
-        whiteSpace: 'nowrap',
-        cursor: 'pointer',
-        userSelect: 'none',
-        '&:hover': { color: 'fg.default' },
-      }}
-    >
-      <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 1, justifyContent: align === 'right' ? 'flex-end' : 'flex-start' }}>
-        {active && (dir === 'desc' ? <Triangle dir="down" /> : <Triangle dir="up" />)}
-        {children}
-      </Box>
-    </Box>
-  );
-}
-
-function Triangle({ dir }: { dir: 'up' | 'down' }) {
-  return (
-    <Box as="span" sx={{ display: 'inline-flex', color: 'fg.default' }}>
-      <svg width="10" height="10" viewBox="0 0 10 10">
-        {dir === 'down' ? <polygon points="2,3 8,3 5,8" fill="currentColor" /> : <polygon points="5,2 8,7 2,7" fill="currentColor" />}
-      </svg>
-    </Box>
-  );
-}
-
-function FilterPill({
-  active,
-  onClick,
-  label,
-  count,
-}: {
-  active: boolean;
-  onClick: () => void;
-  label: string;
-  count: number;
-}) {
-  return (
-    <Box
-      as="button"
-      onClick={onClick}
-      sx={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 1,
-        px: 2,
-        py: '4px',
-        bg: active ? 'canvas.default' : 'transparent',
-        border: '1px solid',
-        borderColor: active ? 'border.default' : 'transparent',
-        borderRadius: 1,
-        color: active ? 'fg.default' : 'fg.muted',
-        cursor: 'pointer',
-        fontFamily: 'inherit',
-        fontSize: 1,
-        fontWeight: active ? 600 : 500,
-        '&:hover': { color: 'fg.default' },
-      }}
-    >
-      <Text>{label}</Text>
-      <Text sx={{ color: 'fg.muted', fontWeight: 500, fontFamily: 'mono', fontVariantNumeric: 'tabular-nums' }}>{count}</Text>
-    </Box>
-  );
-}
-
-type PillKind = 'open-issue' | 'closed-issue' | 'open-pr' | 'merged-pr' | 'closed-pr';
-function StatePill({ kind }: { kind: PillKind }) {
-  const conf: Record<PillKind, { label: string; bg: string; fg: string; border: string; dotColor: string }> = {
-    'open-issue': { label: 'OPEN', bg: 'transparent', fg: 'fg.default', border: 'border.default', dotColor: 'fg.muted' },
-    'closed-issue': { label: 'CLOSED', bg: 'success.subtle', fg: 'success.fg', border: 'success.muted', dotColor: 'success.emphasis' },
-    'open-pr': { label: 'OPEN', bg: 'transparent', fg: 'fg.default', border: 'border.default', dotColor: 'fg.muted' },
-    'merged-pr': { label: 'MERGED', bg: 'success.subtle', fg: 'success.fg', border: 'success.muted', dotColor: 'success.emphasis' },
-    'closed-pr': { label: 'CLOSED', bg: 'danger.subtle', fg: 'danger.fg', border: 'danger.muted', dotColor: 'danger.emphasis' },
-  };
-  const c = conf[kind];
-  return (
-    <Box
-      sx={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 1,
-        px: 2,
-        py: '2px',
-        bg: c.bg,
-        border: '1px solid',
-        borderColor: c.border,
-        color: c.fg,
-        borderRadius: 999,
-        fontSize: '10px',
-        fontWeight: 700,
-        letterSpacing: '0.5px',
-      }}
-    >
-      <Box sx={{ width: 6, height: 6, borderRadius: '50%', bg: c.dotColor }} />
-      {c.label}
-    </Box>
-  );
-}
-
-function fmtShortDate(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return '—';
-  const dd = String(d.getDate()).padStart(2, '0');
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const yyyy = d.getFullYear();
-  return `${dd}/${mm}/${yyyy}`;
+  return <PullsTable repo={`${owner}/${name}`} />;
 }
 
 // ─── Code tab ────────────────────────────────────────────────────────────────
@@ -1110,353 +639,11 @@ interface HealthResp {
 }
 
 // ─── Maintenance tab: maintainer-performance scorecard ────────────────────────
-
-/** null-aware ratio→percent. Distinguishes a true 0% from "no data" (—). */
-function formatRatioPct(value: number | null | undefined, fallback = '—'): string {
-  if (value == null || !Number.isFinite(value)) return fallback;
-  return `${Math.round(value * 100)}%`;
-}
-
-/** Colour a duration by how long contributors are kept waiting. */
-function ageTone(days: number | null, warn = 14, bad = 30): string {
-  if (days == null) return 'fg.default';
-  if (days <= warn) return 'success.fg';
-  if (days <= bad) return 'attention.fg';
-  return 'danger.fg';
-}
+// The scorecard (gauges + meters) and its helpers now live in the shared
+// MaintainerScorecard component so the /explorer Repository tab can reuse them.
 
 function MaintenanceTab({ owner, name }: { owner: string; name: string }) {
-  const { data, isLoading, isError } = useQuery<MaintainerStats>({
-    ...maintainerStatsQuery(owner, name),
-    staleTime: 5 * 60_000,
-  });
-
-  if (isLoading) return <PanelLoading />;
-  if (isError || !data) return <PanelError message="Failed to load maintainer stats." />;
-  if (!data.hasData) {
-    return (
-      <PanelEmpty
-        title="No miner activity cached yet"
-        message="No registered gittensor miner has an open or merged PR (or a discovered issue) cached for this repository yet. Stats appear once the poller has synced miner contributions."
-      />
-    );
-  }
-
-  const tp = data.throughput;
-  const rp = data.responsiveness;
-  const prHead = headlineReviewSpeed(data);
-  const issueHead = headlineIssueResponse(data);
-  // PR figures only when the repo rewards PRs; issue figures only when it
-  // rewards issue discovery. A 100% issue-discovery repo never shows merge speed.
-  const hasPr = data.issueDiscoveryShare < 1;
-  const hasIssue = data.issueDiscoveryShare > 0;
-
-  return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-      <Box>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 1, flexWrap: 'wrap' }}>
-          <Heading sx={{ fontSize: 4, m: 0 }}>Maintainer Performance</Heading>
-          {data.issueDiscoveryEnabled ? (
-            <Label variant="accent">issue discovery · {Math.round(data.issueDiscoveryShare * 100)}%</Label>
-          ) : null}
-          {!data.minerFiltered ? (
-            <Label variant="attention">miner list unavailable — all contributors</Label>
-          ) : null}
-        </Box>
-        <Text sx={{ color: 'fg.muted' }}>
-          How responsive maintainers are to{' '}
-          <Text as="span" sx={{ fontWeight: 600, color: 'fg.default' }}>gittensor miners&apos;</Text> contributions
-          {data.minerFiltered ? (
-            <> — restricted to registered miners&apos; work.</>
-          ) : (
-            <> — the miner list is temporarily unavailable, so this currently counts{' '}
-              <Text as="span" sx={{ fontWeight: 600, color: 'attention.fg' }}>all contributors</Text>.</>
-          )}
-          {hasPr && hasIssue
-            ? ' This repo rewards both PRs and issue discovery, so both gauges apply.'
-            : hasIssue
-              ? ' This repo rewards issue discovery, so issue response — not PR merges — is the scored work.'
-              : ' Review speed is how fast miner PRs get merged.'}
-        </Text>
-      </Box>
-
-      {/* Adaptive gauge hero(es) — PR review speed and/or issue response */}
-      {hasPr ? (
-        <SpeedGaugeHero
-          icon={StopwatchIcon}
-          title="Review speed"
-          head={prHead}
-          verdict={reviewSpeedVerdict(prHead.hours)}
-          barColor="#22c55e"
-          valueLabel="typical merge time"
-          sampleNoun="miner PRs"
-          verb="merged"
-          extra={{ label: 'of merged PRs are from miners', value: tp.minerMergeShare }}
-        />
-      ) : null}
-      {hasIssue ? (
-        <SpeedGaugeHero
-          icon={IssueOpenedIcon}
-          title="Issue response"
-          head={issueHead}
-          verdict={issueResponseVerdict(issueHead.hours)}
-          barColor="#6366f1"
-          valueLabel="typical solve time"
-          sampleNoun="miner issues"
-          verb="solved"
-          extra={{ label: 'of discovered issues get solved', value: rp.completionRate }}
-        />
-      ) : null}
-
-      <MetersDetail data={data} />
-
-      <Text sx={{ fontSize: 0, color: 'fg.subtle' }}>
-        Updated {formatRelativeTime(data.generatedAt)} · derived from cached PR/issue timestamps.
-      </Text>
-    </Box>
-  );
-}
-
-// ─── Maintenance-tab visual helpers ─────────────────────────────────────────
-
-const PR_GREEN = '#22c55e';
-const ISSUE_INDIGO = '#6366f1';
-
-/** Filled progress bar for a 0..1 ratio. */
-function MeterBar({ pct, color }: { pct: number | null; color: string }) {
-  const w = pct == null || !Number.isFinite(pct) ? 0 : Math.max(0, Math.min(1, pct)) * 100;
-  return (
-    <Box sx={{ height: '6px', borderRadius: 6, bg: 'border.default', overflow: 'hidden', mt: 1 }}>
-      <Box sx={{ height: '100%', width: `${w}%`, bg: color, borderRadius: 6 }} />
-    </Box>
-  );
-}
-
-/** Label + percentage + meter bar. */
-function RateRow({ label, hint, pct, color }: { label: string; hint?: string; pct: number | null; color: string }) {
-  return (
-    <Box sx={{ py: '6px' }}>
-      <Box sx={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 3 }}>
-        <Box>
-          <Text sx={{ fontSize: 1, color: 'fg.default' }}>{label}</Text>
-          {hint ? <Text sx={{ display: 'block', fontSize: 0, color: 'fg.subtle' }}>{hint}</Text> : null}
-        </Box>
-        <Text sx={{ fontFamily: 'mono', fontWeight: 600, fontVariantNumeric: 'tabular-nums', color }}>{formatRatioPct(pct)}</Text>
-      </Box>
-      <MeterBar pct={pct} color={color} />
-    </Box>
-  );
-}
-
-/** Mini log-scale bar: median dot, faded band to p90, optional secondary marker. */
-// ── Detail panels: volume / backlog / rates (the gauge owns the speed story) ─
-function MetersDetail({ data }: { data: MaintainerStats }) {
-  const tp = data.throughput, bl = data.backlog, rp = data.responsiveness;
-  const decHead = headlineDecisionSpeed(data);
-  const hasPr = data.issueDiscoveryShare < 1, hasIssue = data.issueDiscoveryShare > 0;
-
-  const panels: React.ReactNode[] = [];
-  if (hasPr) {
-    panels.push(
-      <Panel key="thr">
-        <Box sx={{ p: 3 }}>
-          <PanelHeader icon={GitMergeIcon} title="PR Throughput" />
-          <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 2, mb: 2 }}>
-            <CountBox label="Merged · 30d" value={tp.mergedPrs30d} />
-            <CountBox label="Merged · all-time" value={tp.mergedPrsTotal} />
-          </Box>
-          <RateRow label="Merge rate" hint="merged of resolved" pct={tp.mergeRate} color={PR_GREEN} />
-          <RateRow label="Miner share of merges" hint="vs all contributors" pct={tp.minerMergeShare} color={PR_GREEN} />
-          <Box sx={{ display: 'flex', flexDirection: 'column', mt: 1 }}>
-            <MetricRow label="Decision time" hint="merged or closed" value={formatDurationHours(decHead.hours)} last />
-          </Box>
-        </Box>
-      </Panel>,
-    );
-    panels.push(
-      <Panel key="bl">
-        <Box sx={{ p: 3 }}>
-          <PanelHeader icon={InboxIcon} title="PR Backlog" />
-          <Box sx={{ display: 'flex', flexDirection: 'column' }}>
-            <MetricRow label="Open PRs" value={bl.openPrs.toLocaleString()} />
-            <MetricRow label="Median open-PR age" value={<Text sx={{ color: ageTone(bl.medianOpenPrAgeDays) }}>{formatDurationDays(bl.medianOpenPrAgeDays)}</Text>} />
-            <MetricRow label="Oldest open PR" value={formatDurationDays(bl.oldestOpenPrDays)} />
-            <MetricRow label={`Stale PRs (>${bl.staleThresholdDays}d)`} value={<Text sx={{ color: bl.stalePrs > 0 ? 'danger.fg' : 'success.fg' }}>{bl.stalePrs.toLocaleString()}</Text>} last />
-          </Box>
-        </Box>
-      </Panel>,
-    );
-  }
-  if (hasIssue) {
-    panels.push(
-      <Panel key="iss">
-        <Box sx={{ p: 3 }}>
-          <PanelHeader icon={IssueOpenedIcon} title="Issue Volume" />
-          <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 2, mb: 2 }}>
-            <CountBox label="Completed · all-time" value={rp.completedIssues} />
-            <CountBox label="Closed · all-time" value={rp.closedIssues} />
-            <CountBox label="Open issues" value={bl.openIssues} />
-          </Box>
-          <RateRow label="Completion rate" hint="solved of all issues" pct={rp.completionRate} color={ISSUE_INDIGO} />
-        </Box>
-      </Panel>,
-    );
-  }
-
-  // 1 panel → full width; 3 → two side-by-side with the third spanning full.
-  if (panels.length === 1) {
-    return <Box sx={{ display: 'grid', gridTemplateColumns: '1fr', gap: 3 }}>{panels}</Box>;
-  }
-  return (
-    <Box sx={{ display: 'grid', gridTemplateColumns: ['1fr', '1fr 1fr'], gap: 3 }}>
-      {panels.map((p, i) =>
-        panels.length === 3 && i === 2 ? (
-          <Box key="iss-span" sx={{ gridColumn: ['auto', '1 / -1'] }}>{p}</Box>
-        ) : (
-          p
-        ),
-      )}
-    </Box>
-  );
-}
-
-function PanelHeader({ icon: IconCmp, title }: { icon: Icon; title: string }) {
-  return (
-    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 3 }}>
-      <IconCmp size={16} />
-      <Heading sx={{ fontSize: 2, fontWeight: 700, m: 0 }}>{title}</Heading>
-    </Box>
-  );
-}
-
-interface GaugeHead {
-  hours: number | null;
-  p90Hours: number | null;
-  sampleSize: number;
-  scope: 'window' | 'all-time';
-  windowDays: number;
-}
-
-/** Log-scale gauge (Primer). Drives both the PR review-speed and the issue-
- *  response heroes; same scale/colours as the /repositories drawer via the
- *  shared helpers in @/lib/api-types, so the two surfaces always agree. */
-function SpeedGaugeHero({
-  icon: IconCmp,
-  title,
-  head,
-  verdict,
-  valueLabel,
-  sampleNoun,
-  verb,
-  extra,
-  barColor,
-}: {
-  icon: Icon;
-  title: string;
-  head: GaugeHead;
-  verdict: { label: string; color: string };
-  valueLabel: string;
-  sampleNoun: string;
-  verb: string;
-  extra?: { label: string; value: number | null };
-  /** Stream-identity colour for the bar (green = PR, indigo = issue). */
-  barColor: string;
-}) {
-  const posMed = reviewSpeedGaugePos(head.hours);
-  const posP90 = reviewSpeedGaugePos(head.p90Hours);
-  const scopeLabel = head.scope === 'window' ? `last ${head.windowDays} days` : 'all-time';
-  return (
-    <Panel>
-      <Box sx={{ p: 3 }}>
-        <Box sx={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 3, flexWrap: 'wrap' }}>
-          <Box>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, color: 'fg.muted', mb: 1 }}>
-              <IconCmp size={14} />
-              <Text sx={{ fontSize: 0, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{title}</Text>
-            </Box>
-            <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 2 }}>
-              <Text sx={{ fontSize: 6, fontWeight: 700, fontFamily: 'mono', fontVariantNumeric: 'tabular-nums', lineHeight: 1, color: verdict.color }}>
-                {formatDurationHours(head.hours)}
-              </Text>
-              <Text sx={{ fontSize: 1, color: 'fg.muted' }}>{valueLabel}</Text>
-            </Box>
-          </Box>
-          <Box
-            as="span"
-            sx={{
-              px: 2,
-              py: '3px',
-              borderRadius: 6,
-              fontSize: 0,
-              fontWeight: 700,
-              textTransform: 'uppercase',
-              letterSpacing: '0.04em',
-              border: '1px solid',
-              whiteSpace: 'nowrap',
-              color: verdict.color,
-              bg: `${verdict.color}1a`,
-              borderColor: `${verdict.color}44`,
-            }}
-          >
-            {verdict.label}
-          </Box>
-        </Box>
-
-        {posMed != null && (
-          <Box sx={{ mt: 3 }}>
-            <Box sx={{ position: 'relative', height: '8px', borderRadius: 6, bg: 'border.default' }}>
-              <Box sx={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${posMed * 100}%`, borderRadius: 6, bg: barColor }} />
-              {posP90 != null && posP90 > posMed && (
-                <Box sx={{ position: 'absolute', top: 0, bottom: 0, left: `${posMed * 100}%`, width: `${(posP90 - posMed) * 100}%`, borderRadius: 6, bg: `${barColor}22` }} />
-              )}
-              <Box sx={{ position: 'absolute', left: `${posMed * 100}%`, top: '-4px', width: '16px', height: '16px', ml: '-8px', borderRadius: '50%', bg: barColor, border: '2px solid', borderColor: 'canvas.default' }} />
-              {posP90 != null && posP90 > posMed && (
-                <Box sx={{ position: 'absolute', left: `${posP90 * 100}%`, top: '-2px', width: '2px', height: '12px', ml: '-1px', bg: `${barColor}aa` }} />
-              )}
-            </Box>
-            <Box sx={{ position: 'relative', height: '14px', mt: 1 }}>
-              {REVIEW_SPEED_GAUGE_TICKS.map((t) => (
-                <Text
-                  key={t.label}
-                  sx={{ position: 'absolute', left: `${(reviewSpeedGaugePos(t.hours) ?? 0) * 100}%`, transform: 'translateX(-50%)', fontSize: '9px', color: 'fg.subtle', fontFamily: 'mono' }}
-                >
-                  {t.label}
-                </Text>
-              ))}
-            </Box>
-          </Box>
-        )}
-
-        <Text sx={{ display: 'block', fontFamily: 'mono', fontSize: 0, color: 'fg.muted', mt: 2 }}>
-          Based on {head.sampleSize.toLocaleString()} {sampleNoun} · {scopeLabel}
-          {head.p90Hours != null ? ` · Most ${verb} in ${formatDurationHours(head.p90Hours)} or less` : ''}
-          {extra && extra.value != null ? ` · ${Math.round(extra.value * 100)}% ${extra.label}` : ''}
-        </Text>
-      </Box>
-    </Panel>
-  );
-}
-
-function MetricRow({ label, value, hint, last }: { label: string; value: React.ReactNode; hint?: string; last?: boolean }) {
-  return (
-    <Box
-      sx={{
-        display: 'flex',
-        alignItems: 'baseline',
-        justifyContent: 'space-between',
-        gap: 3,
-        py: '8px',
-        borderBottom: last ? 'none' : '1px solid',
-        borderColor: 'border.muted',
-      }}
-    >
-      <Box sx={{ minWidth: 0 }}>
-        <Text sx={{ fontSize: 1, color: 'fg.default' }}>{label}</Text>
-        {hint && <Text sx={{ display: 'block', fontSize: 0, color: 'fg.subtle' }}>{hint}</Text>}
-      </Box>
-      <Box sx={{ fontFamily: 'mono', fontWeight: 600, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{value}</Box>
-    </Box>
-  );
+  return <MaintainerScorecard owner={owner} name={name} />;
 }
 
 function RepoCheckTab({ owner, name }: { owner: string; name: string }) {
@@ -1606,18 +793,6 @@ function HealthScoreCard({ pct }: { pct: number }) {
   );
 }
 
-function CountBox({ label, value, hint }: { label: string; value: number; hint?: string }) {
-  return (
-    <Box sx={{ border: '1px solid', borderColor: 'border.default', borderRadius: 2, p: 2 }}>
-      <Text sx={{ display: 'block', fontSize: 4, fontWeight: 700, color: 'fg.default', fontFamily: 'mono', fontVariantNumeric: 'tabular-nums' }}>
-        {value.toLocaleString()}
-      </Text>
-      <Text sx={{ display: 'block', fontSize: 0, color: 'fg.muted', fontWeight: 600 }}>{label}</Text>
-      {hint && <Text sx={{ display: 'block', fontSize: 0, color: 'fg.subtle' }}>{hint}</Text>}
-    </Box>
-  );
-}
-
 function StandardRow({ present, label, desc }: { present: boolean; label: string; desc: string }) {
   return (
     <Box
@@ -1649,7 +824,7 @@ function formatDate(iso: string): string {
 
 // ─── Top Miner Contributors sidebar card ─────────────────────────────────────
 
-function TopMinersCard({ owner, name }: { owner: string; name: string }) {
+function TopMinersCard({ owner, name, issueDiscoveryEnabled }: { owner: string; name: string; issueDiscoveryEnabled: boolean }) {
   const [tab, setTab] = useState<'oss' | 'issue'>('oss');
   const { data, isLoading, isError, error } = useQuery<RepoMinersResponse>({
     queryKey: ['gt-repo-miners', owner, name],
@@ -1662,8 +837,13 @@ function TopMinersCard({ owner, name }: { owner: string; name: string }) {
   });
   const ossCount = data?.ossContributions?.length ?? 0;
   const issueCount = data?.issueDiscoveries?.length ?? 0;
-  const rows = (tab === 'oss' ? data?.ossContributions : data?.issueDiscoveries) ?? [];
-  const otherCount = tab === 'oss' ? issueCount : ossCount;
+  // Only offer the Discovery tab when the repo currently rewards issue discovery
+  // (same flag as the "Issue Discovery" stat). Cached historical discoveries on a
+  // now-disabled repo don't count — otherwise it's OSS-only, no tabs.
+  const showDiscovery = issueDiscoveryEnabled;
+  const view = showDiscovery ? tab : 'oss';
+  const rows = (view === 'oss' ? data?.ossContributions : data?.issueDiscoveries) ?? [];
+  const otherCount = view === 'oss' ? issueCount : ossCount;
   const total = rows.length;
 
   return (
@@ -1675,27 +855,29 @@ function TopMinersCard({ owner, name }: { owner: string; name: string }) {
         </Heading>
       </Box>
       <Box sx={{ borderTop: '1px solid', borderColor: 'border.default', pt: 2 }}>
-        <Box
-          role="tablist"
-          aria-label="Miner contributor score type"
-          sx={{
-            display: 'grid',
-            gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
-            mb: 2,
-            borderBottom: '1px solid',
-            borderColor: 'border.default',
-          }}
-        >
-          <MinerTabBtn active={tab === 'oss'} count={ossCount} onClick={() => setTab('oss')}>OSS</MinerTabBtn>
-          <MinerTabBtn active={tab === 'issue'} count={issueCount} onClick={() => setTab('issue')}>Discovery</MinerTabBtn>
-        </Box>
+        {showDiscovery && (
+          <Box
+            role="tablist"
+            aria-label="Miner contributor score type"
+            sx={{
+              display: 'grid',
+              gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
+              mb: 2,
+              borderBottom: '1px solid',
+              borderColor: 'border.default',
+            }}
+          >
+            <MinerTabBtn active={view === 'oss'} count={ossCount} onClick={() => setTab('oss')}>OSS</MinerTabBtn>
+            <MinerTabBtn active={view === 'issue'} count={issueCount} onClick={() => setTab('issue')}>Discovery</MinerTabBtn>
+          </Box>
+        )}
         <Box as="table" sx={{ width: '100%', borderCollapse: 'collapse', fontSize: 1 }}>
           <Box as="thead">
             <Box as="tr">
               <Box as="th" sx={{ textAlign: 'left', fontSize: '10px', color: 'fg.muted', fontWeight: 600, py: '6px', width: 22 }}>#</Box>
               <Box as="th" sx={{ textAlign: 'left', fontSize: '10px', color: 'fg.muted', fontWeight: 600, py: '6px' }}>MINER</Box>
-              <Box as="th" sx={{ textAlign: 'right', fontSize: '10px', color: 'fg.muted', fontWeight: 600, py: '6px' }}>{tab === 'oss' ? 'PRS' : 'COMPLETED'}</Box>
-              <Box as="th" sx={{ textAlign: 'right', fontSize: '10px', color: 'fg.muted', fontWeight: 600, py: '6px' }}>{tab === 'oss' ? 'REPO SCORE' : 'CLOSED'}</Box>
+              <Box as="th" sx={{ textAlign: 'right', fontSize: '10px', color: 'fg.muted', fontWeight: 600, py: '6px' }}>{view === 'oss' ? 'PRS' : 'COMPLETED'}</Box>
+              <Box as="th" sx={{ textAlign: 'right', fontSize: '10px', color: 'fg.muted', fontWeight: 600, py: '6px' }}>{view === 'oss' ? 'REPO SCORE' : 'CLOSED'}</Box>
             </Box>
           </Box>
           <Box as="tbody">
@@ -1716,11 +898,11 @@ function TopMinersCard({ owner, name }: { owner: string; name: string }) {
             {!isLoading && !isError && rows.length === 0 && (
               <Box as="tr">
                 <Box as="td" colSpan={4} sx={{ p: 3, textAlign: 'center', color: 'fg.muted', fontSize: 0 }}>
-                  {emptyMinerMessage(tab, otherCount)}
+                  {emptyMinerMessage(view, otherCount)}
                 </Box>
               </Box>
             )}
-            {rows.map((m, i) => (
+            {rows.slice(0, 5).map((m, i) => (
               <Box as="tr" key={`${m.githubId}-${m.githubUsername}`} sx={{ borderTop: '1px solid', borderColor: 'border.muted' }}>
                 <Box as="td" sx={{ py: '8px', color: 'fg.muted', fontFamily: 'mono', fontVariantNumeric: 'tabular-nums', verticalAlign: 'top' }}>
                   {i + 1}
@@ -1736,12 +918,12 @@ function TopMinersCard({ owner, name }: { owner: string; name: string }) {
                     />
                     <Box>
                       <Text sx={{ fontWeight: 600, color: 'fg.default', display: 'block' }}>{m.githubUsername}</Text>
-                      {tab === 'oss' && m.ossRank != null && (
+                      {view === 'oss' && m.ossRank != null && (
                         <Text sx={{ display: 'block', fontSize: 0, color: 'fg.muted' }}>
                           Global #{m.ossRank}{m.globalScore != null ? ` - ${m.globalScore.toFixed(2)}` : ''}
                         </Text>
                       )}
-                      {tab === 'issue' && m.reason && (
+                      {view === 'issue' && m.reason && (
                         <Text sx={{ display: 'block', fontSize: 0, color: issueReasonColor(m), maxWidth: 155 }}>
                           {m.reason}
                         </Text>
@@ -1750,10 +932,10 @@ function TopMinersCard({ owner, name }: { owner: string; name: string }) {
                   </Box>
                 </Box>
                 <Box as="td" sx={{ py: '8px', textAlign: 'right', fontFamily: 'mono', fontVariantNumeric: 'tabular-nums', fontWeight: 700, color: 'fg.default', verticalAlign: 'top' }}>
-                  {tab === 'oss' ? m.prCount : m.completedIssueCount ?? m.solvedIssueCount ?? 0}
+                  {view === 'oss' ? m.prCount : m.completedIssueCount ?? m.solvedIssueCount ?? 0}
                 </Box>
                 <Box as="td" sx={{ py: '8px', textAlign: 'right', fontFamily: 'mono', fontVariantNumeric: 'tabular-nums', fontWeight: 700, color: m.score > 0 ? 'fg.default' : 'fg.muted', verticalAlign: 'top' }}>
-                  {tab === 'oss' ? m.score.toFixed(2) : m.otherClosedIssueCount ?? Math.max(0, (m.issueCount ?? 0) - (m.completedIssueCount ?? 0))}
+                  {view === 'oss' ? m.score.toFixed(2) : m.otherClosedIssueCount ?? Math.max(0, (m.issueCount ?? 0) - (m.completedIssueCount ?? 0))}
                 </Box>
               </Box>
             ))}
@@ -1832,53 +1014,3 @@ function MinerTabBtn({ active, count, onClick, children }: { active: boolean; co
   );
 }
 
-// ─── Generic panels ──────────────────────────────────────────────────────────
-
-function Panel({ children }: { children: React.ReactNode }) {
-  return (
-    <Box sx={{ border: '1px solid', borderColor: 'border.default', borderRadius: 2, bg: 'canvas.default', overflowX: 'auto', overflowY: 'hidden' }}>
-      {children}
-    </Box>
-  );
-}
-
-function PanelLoading() {
-  // Generic skeleton for any tab panel — readme, code, issues, pulls, etc.
-  // A few text-line shapes feel more accurate than a centered spinner since
-  // most panels render text/table content.
-  return (
-    <Panel>
-      <Box sx={{ p: 4, display: 'flex', flexDirection: 'column', gap: 3 }}>
-        {Array.from({ length: 8 }).map((_, i) => (
-          <Box
-            key={i}
-            sx={{ display: 'flex', alignItems: 'center', gap: 3, opacity: Math.max(0.25, 1 - i * 0.09) }}
-          >
-            <SkeletonBar width={i % 3 === 0 ? 14 : 12} height={i % 3 === 0 ? 14 : 12} rounded={i % 3 === 0 ? 999 : 6} />
-            <SkeletonBar flex={1} height={10} />
-            {i % 2 === 0 && <SkeletonBar width={60} height={10} />}
-          </Box>
-        ))}
-      </Box>
-    </Panel>
-  );
-}
-
-function PanelError({ message }: { message: string }) {
-  return (
-    <Box sx={{ p: 3, border: '1px solid', borderColor: 'danger.emphasis', bg: 'danger.subtle', borderRadius: 2 }}>
-      <Text sx={{ color: 'danger.fg' }}>{message}</Text>
-    </Box>
-  );
-}
-
-function PanelEmpty({ title, message }: { title: string; message: string }) {
-  return (
-    <Panel>
-      <Box sx={{ p: 5, textAlign: 'center' }}>
-        <Heading sx={{ fontSize: 3, mb: 1 }}>{title}</Heading>
-        <Text sx={{ color: 'fg.muted' }}>{message}</Text>
-      </Box>
-    </Panel>
-  );
-}

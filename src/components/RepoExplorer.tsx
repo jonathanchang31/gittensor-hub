@@ -45,6 +45,8 @@ import { tableHeaderSx, tableCellSx, tableTimeSx } from '@/components/repo-explo
 import { weightColor, weightFontWeight } from '@/components/repo-explorer/weights';
 import { SortHeader } from '@/components/repo-explorer/SortHeader';
 import { TabButton } from '@/components/repo-explorer/TabButton';
+import { MaintainerScorecard } from '@/components/repositories/MaintainerScorecard';
+import { FairnessSignalsCard } from '@/components/repositories/FairnessSignalsCard';
 import { ValidationPicker } from '@/components/repo-explorer/ValidationPicker';
 import { ResizeHandle } from '@/components/repo-explorer/ResizeHandle';
 import { InlinePagination } from '@/components/repo-explorer/Pagination';
@@ -58,7 +60,7 @@ import {
 } from '@/lib/gittensor-policy';
 
 type RepoSort = 'weight' | 'name' | 'tracked';
-type Tab = 'issues' | 'pulls';
+type Tab = 'repository' | 'issues' | 'pulls';
 type AuthorTarget = { login: string; association?: string | null; initialTab: 'issues' | 'pulls' };
 type StickyBadge = { issues: number; pulls: number; priority?: boolean };
 interface RepoBadgesResponse {
@@ -279,7 +281,7 @@ export default function RepoExplorer() {
   const [repoSort, setRepoSort] = useState<RepoSort>('weight');
   const [trackedOnly, setTrackedOnly] = useState(false);
   const [selected, setSelected] = useState<Sn74Repo>(EMPTY_REPO);
-  const [tab, setTabState] = useState<Tab>('issues');
+  const [tab, setTabState] = useState<Tab>('repository');
 
   const {
     query: issueQuery,
@@ -444,7 +446,7 @@ export default function RepoExplorer() {
   useEffect(() => {
     if (!searchParams) return;
     const t = searchParams.get('tab');
-    if (t === 'issues' || t === 'pulls') setTabState(t);
+    if (t === 'repository' || t === 'issues' || t === 'pulls') setTabState(t);
     const issueParam = searchParams.get('issue');
     const pullParam = searchParams.get('pull');
     if (issueParam) {
@@ -715,6 +717,10 @@ export default function RepoExplorer() {
   // return empty payloads but it's wasted work.
   const queriesReady = settingsReady && routeReady && selected.fullName !== '';
   const shouldLoadIssues = tab === 'issues';
+  // Owner/name split of the selected repo for the Repository tab's scorecard.
+  const repositorySlash = selected.fullName.indexOf('/');
+  const repositoryOwner = repositorySlash >= 0 ? selected.fullName.slice(0, repositorySlash) : selected.fullName;
+  const repositoryName = repositorySlash >= 0 ? selected.fullName.slice(repositorySlash + 1) : '';
 
   const buildIssuesUrl = (page: number, size: number) => {
     const sp = new URLSearchParams();
@@ -1644,7 +1650,13 @@ export default function RepoExplorer() {
           <RepoPolicyPanel repo={selected} />
 
           {/* Tabs */}
-          <Box sx={{ display: 'flex', gap: 4, mb: '-1px' }}>
+          <Box sx={{ display: 'flex', gap: [1, 3], mb: '-1px', flexWrap: 'nowrap', overflowX: 'auto', scrollbarWidth: 'none', '&::-webkit-scrollbar': { display: 'none' } }}>
+            <TabButton
+              active={tab === 'repository'}
+              onClick={() => switchTab('repository')}
+              icon={<RepoIcon size={16} />}
+              label="Maintainers"
+            />
             <TabButton
               active={tab === 'issues'}
               onClick={() => switchTab('issues')}
@@ -1657,14 +1669,35 @@ export default function RepoExplorer() {
               active={tab === 'pulls'}
               onClick={() => switchTab('pulls')}
               icon={<GitPullRequestIcon size={16} />}
-              label="Pull Requests"
+              label={
+                <>
+                  <Box as="span" sx={{ display: ['inline', 'none'] }}>PRs</Box>
+                  <Box as="span" sx={{ display: ['none', 'inline'] }}>Pull Requests</Box>
+                </>
+              }
               count={renderedPullTabCount}
               newCount={tab === 'pulls' ? 0 : renderedNewPullsCount}
             />
           </Box>
         </Box>
 
-        {tab === 'issues' ? (
+        {tab === 'repository' ? (
+          <Box sx={{ flex: 1, overflowY: 'auto', overflowX: 'auto' }}>
+            {selected.fullName !== '' && (
+              <Box sx={{ p: 3, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <MaintainerScorecard owner={repositoryOwner} name={repositoryName} />
+                {/* PR-merge fairness when the repo rewards PRs, issue-completion
+                  * fairness when it rewards issue discovery — both on mixed repos. */}
+                {(selected.issueDiscoveryShare ?? 0) < 1 && (
+                  <FairnessSignalsCard repositoryFullName={selected.fullName} mode="pr" />
+                )}
+                {(selected.issueDiscoveryShare ?? 0) > 0 && (
+                  <FairnessSignalsCard repositoryFullName={selected.fullName} mode="issue" />
+                )}
+              </Box>
+            )}
+          </Box>
+        ) : tab === 'issues' ? (
           <>
             <Box sx={{ p: 3, pt: 3, flexShrink: 0, borderBottom: '1px solid', borderColor: 'var(--border-default)' }}>
               <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>

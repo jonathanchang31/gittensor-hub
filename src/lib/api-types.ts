@@ -163,6 +163,50 @@ export function pullStatus(p: PullDto): PullStatus {
   return 'open';
 }
 
+// ─── Fairness signals (see src/lib/fairness-signals.ts) ───────────────────────
+// Per-miner merge-speed vs the repo baseline — surfaces maintainer fast-tracking
+// of favored accounts. Computed from cached PR timestamps; maintainers excluded.
+
+export interface MinerFairnessRow {
+  login: string;
+  /** Resolved items: merged PRs (pr mode) or completed issues (issue mode). */
+  resolved: number;
+  /** Rejected: closed-unmerged PRs (pr) / not_planned+duplicate issues (issue). */
+  rejected: number;
+  /** rejected / (resolved + rejected). null when nothing resolved. */
+  rejectRate: number | null;
+  /** Median time-to-resolve for this miner's resolved items, hours (PR: open→
+   *  merge; issue: open→completed-close). */
+  medianTtmHours: number;
+  /** (repoMedian − minerMedian) / repoMedian — signed; positive = faster than
+   *  the repo baseline. null when there's no baseline. */
+  deltaVsRepoMedian: number | null;
+  /** medianTtm < repo baseline — the "fast-tracked" highlight. */
+  fasterThanRepo: boolean;
+}
+
+export interface FairnessSignals {
+  repo: string;
+  /** `pr` ranks PR-merge speed; `issue` ranks issue-completion speed (used on
+   *  pure issue-discovery repos where merges aren't the scored work). */
+  mode: 'pr' | 'issue';
+  /** Pooled median time-to-resolve over every non-maintainer miner item (hours). */
+  repoMedianTtmHours: number | null;
+  /** Total resolved items behind the baseline. */
+  resolvedSample: number;
+  /** Distinct non-maintainer miners with ≥1 resolved item. */
+  minerCount: number;
+  /** Whether rows were restricted to registered miners. False = miner feed was
+   *  unavailable, so every contributor is counted (graceful fallback). */
+  minerFiltered: boolean;
+  /** Maintainer logins filtered out (for transparency in the UI). */
+  maintainersExcluded: number;
+  /** Whether maintainer filtering was applied (false = mirror unavailable). */
+  maintainerFiltered: boolean;
+  /** Fastest-first (shortest median time-to-resolve). */
+  miners: MinerFairnessRow[];
+}
+
 // ─── Maintainer scorecard (see src/lib/maintainer-stats.ts) ───────────────────
 // Kept here (no server deps) so client components can `import type` the shape
 // without pulling in the better-sqlite3-backed computation module.
